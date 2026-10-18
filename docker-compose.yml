@@ -25,6 +25,28 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  client:
+    build: ./client
+    environment:
+      API_URL: http://api:3000
+      PORT: 8080
+      DATA_FILE: /data/demo.json
+    ports:
+      - "8080:8080"
+    volumes:
+      - clientdata:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
 
 volumes:
   pgdata:
+  clientdata:

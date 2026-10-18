@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Processor — Usage Metering demo</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --mute:#6b7685; --line:#e3e7ec;
+          --ok:#1f8a4c; --okbg:#e6f5ec; --warn:#b26a00; --warnbg:#fff3df; --bad:#b3261e; --badbg:#fdeceb; --accent:#2f5bea; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:#1c2430; color:#fff; padding:14px 24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .meta { color:#aab4c3; font-size:13px; flex:1; }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:16px; }
+  .grid { display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 10px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .grow { flex:1; }
+  .big { font-size:20px; font-weight:600; }
+  .mute { color:var(--mute); font-size:13px; }
+  .bar { height:10px; background:#e9edf2; border-radius:6px; overflow:hidden; margin:8px 0 4px; }
+  .bar > div { height:100%; background:var(--accent); }
+  .bar.full > div { background:var(--warn); }
+  button { font:inherit; border:1px solid var(--line); background:#fff; border-radius:7px; padding:7px 12px; cursor:pointer; }
+  button:hover { border-color:#b9c2cf; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.small { padding:4px 9px; font-size:13px; }
+  input, select { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:7px; background:#fff; }
+  input[type=number] { width:96px; }
+  .decision { border-radius:8px; padding:12px 14px; border:1px solid; }
+  .decision.ok { background:var(--okbg); border-color:#bfe3cd; }
+  .decision.no { background:var(--warnbg); border-color:#f1d9a8; }
+  .decision.err { background:var(--badbg); border-color:#f0c4c1; }
+  .decision .head { font-weight:700; margin-bottom:4px; }
+  .decision.ok .head { color:var(--ok); } .decision.no .head { color:var(--warn); } .decision.err .head { color:var(--bad); }
+  .badge { font-size:11px; background:#1c2430; color:#fff; border-radius:10px; padding:2px 8px; margin-left:6px; vertical-align:middle; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--mute); font-weight:500; font-size:12px; text-transform:uppercase; }
+  .steps { display:flex; flex-wrap:wrap; gap:8px; }
+  .tag-ok { color:var(--ok); font-weight:600; } .tag-no { color:var(--warn); font-weight:600; }
+  #toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--bad); color:#fff; padding:10px 16px; border-radius:8px; display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Document Processor</h1>
+  <div class="meta" id="meta">connecting…</div>
+  <button id="resetBtn" class="small">Reset demo</button>
+</header>
+<main>
+  <div class="card">
+    <h2>Guided demo — click in order</h2>
+    <div class="steps" id="steps"></div>
+    <div class="mute" style="margin-top:8px">The app code never changes: only the plans change. Each click asks the service for permission before "processing" a document.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card" id="accountCard"></div>
+    <div class="card"><h2>Latest decision</h2><div id="decision" class="mute">Nothing processed yet.</div></div>
+  </div>
+
+  <div class="card"><h2>Users</h2><div class="grid" id="users"></div></div>
+
+  <div class="grid">
+    <div class="card"><h2>Plans</h2><div id="plans"></div></div>
+    <div class="card"><h2>Recent requests</h2><div id="history"></div></div>
+  </div>
+</main>
+<div id="toast"></div>
+<script>
+const $ = (s) => document.querySelector(s);
+let state = null;
+let lastDecision = null;
+const unitsInput = {};
+
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.style.display = "block";
+  setTimeout(() => (t.style.display = "none"), 4000);
+}
+
+async function post(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+  return { status: r.status, body: await r.json() };
+}
+
+async function refresh() {
+  const r = await fetch("/api/state");
+  state = await r.json();
+  render();
+}
+
+async function act(path, body) {
+  const r = await post(path, body);
+  if (r.status >= 400) toast(r.body.message || r.body.error || "Request failed");
+  await refresh();
+  return r;
+}
+
+async function processDoc(userId, units, requestId) {
+  const r = await post("/api/process", { userId, units, requestId });
+  lastDecision = { status: r.status, body: r.body };
+  await refresh();
+}
+
+function bar(consumed, allowance) {
+  const pct = allowance === 0 ? 100 : Math.min(100, (consumed / allowance) * 100);
+  return h("div", { class: "bar" + (pct >= 100 ? " full" : "") }, h("div", { style: `width:${pct}%` }));
+}
+
+function limitsText(l) {
+  return `${l.monthlyAllowance} units/month · max ${l.maxPerRequest} per request`;
+}
+
+function render() {
+  const { account, usage, plans, history } = state;
+  $("#meta").textContent = `Calling ${state.apiUrl} with API key ${state.apiKeyHint} · month ${usage.month} (UTC)`;
+
+  // Account card
+  const acc = usage.account;
+  const accountPlans = plans.filter((p) => p.type === "account");
+  const accSel = h("select", { onchange: (e) => act("/api/account-plan", { planId: e.target.value }) },
+    accountPlans.map((p) => h("option", { value: p.id, ...(p.id === acc.plan.id ? { selected: "" } : {}) }, p.name + (p.isPredefined ? "" : " (custom)"))));
+  $("#accountCard").replaceChildren(
+    h("h2", {}, "Shared account allowance"),
+    h("div", { class: "big" }, `${account.name}`),
+    h("div", { class: "mute" }, `Plan: ${acc.plan.name} — ${limitsText(acc.limits)}`),
+    bar(acc.consumed, acc.limits.monthlyAllowance),
+    h("div", {}, `${acc.consumed} used · `, h("b", {}, `${acc.remaining} remaining`)),
+    h("div", { class: "row", style: "margin-top:10px" }, h("span", { class: "mute" }, "Switch account plan:"), accSel),
+  );
+
+  // Users
+  const userPlans = plans.filter((p) => p.type === "user");
+  $("#users").replaceChildren(...usage.users.map((u) => {
+    const sel = h("select", { onchange: (e) => act("/api/user-plan", { userId: u.userId, planId: e.target.value }) },
+      userPlans.map((p) => h("option", { value: p.id, ...(p.id === u.plan.id ? { selected: "" } : {}) }, p.name + (p.isPredefined ? "" : " (custom)"))));
+    const input = h("input", { type: "number", min: "1", step: "1", value: unitsInput[u.userId] ?? 10,
+      oninput: (e) => (unitsInput[u.userId] = e.target.value) });
+    return h("div", { class: "card", style: "background:#fbfcfd" },
+      h("div", { class: "big" }, u.userId),
+      h("div", { class: "mute" }, `${limitsText(u.limits)}`),
+      bar(u.consumed, u.limits.monthlyAllowance),
+      h("div", {}, `${u.consumed} used · `, h("b", {}, `${u.remaining} remaining`)),
+      h("div", { class: "row", style: "margin-top:10px" }, h("span", { class: "mute" }, "Plan:"), sel),
+      h("div", { class: "row", style: "margin-top:10px" }, input,
+        h("button", { class: "primary", onclick: () => processDoc(u.userId, Number(input.value)) }, "Process document")),
+    );
+  }));
+
+  // Decision
+  const d = lastDecision;
+  const box = $("#decision");
+  if (!d) {
+    box.className = "mute"; box.textContent = "Nothing processed yet.";
+  } else if (d.status >= 400) {
+    box.className = "decision err";
+    box.replaceChildren(h("div", { class: "head" }, "ERROR"), h("div", {}, d.body.message || d.body.error));
+  } else {
+    const r = d.body;
+    box.className = "decision " + (r.accepted ? "ok" : "no");
+    const head = h("div", { class: "head" }, r.accepted ? "ACCEPTED" : "REJECTED",
+      r.replayed ? h("span", { class: "badge" }, "replayed — not counted twice") : "");
+    box.replaceChildren(
+      head,
+      h("div", {}, r.accepted ? `${r.userId} processed a document (${r.units} units).` : `${r.rejection.message}`),
+      r.accepted ? "" : h("div", { class: "mute" }, `Blocked by the ${r.rejection.level} plan: ${r.rejection.rule.replaceAll("_", " ")}.`),
+      h("div", { class: "mute", style: "margin-top:6px" },
+        `${r.userId} remaining: ${r.user.remaining} · account remaining: ${r.account.remaining}`),
+      h("div", { style: "margin-top:8px" },
+        h("button", { class: "small", onclick: () => processDoc(r.userId, r.units, r.requestId) }, "Retry this exact request")),
+    );
+  }
+
+  // Plans
+  const planRows = plans.map((p) => {
+    if (p.isPredefined) {
+      return h("tr", {}, h("td", {}, p.name), h("td", {}, p.type), h("td", {}, p.monthlyAllowance), h("td", {}, p.maxPerRequest), h("td", { class: "mute" }, "read-only"));
+    }
+    const a = h("input", { type: "number", min: "0", value: p.monthlyAllowance });
+    const m = h("input", { type: "number", min: "1", value: p.maxPerRequest });
+    return h("tr", {}, h("td", {}, p.name), h("td", {}, p.type), h("td", {}, a), h("td", {}, m),
+      h("td", {}, h("button", { class: "small", onclick: () => act("/api/edit-plan", { planId: p.id, monthlyAllowance: a.value, maxPerRequest: m.value }) }, "Save")));
+  });
+  const nName = h("input", { placeholder: "name", style: "width:110px" });
+  const nType = h("select", {}, h("option", { value: "user" }, "user"), h("option", { value: "account" }, "account"));
+  const nAllow = h("input", { type: "number", placeholder: "per month", value: 100 });
+  const nMax = h("input", { type: "number", placeholder: "per request", value: 10 });
+  $("#plans").replaceChildren(
+    h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Type", "Per month", "Per request", ""].map((t) => h("th", {}, t)))), h("tbody", {}, planRows)),
+    h("div", { class: "row", style: "margin-top:12px" }, nName, nType, nAllow, nMax,
+      h("button", { class: "small", onclick: () => act("/api/create-plan", { name: nName.value || "Custom", type: nType.value, monthlyAllowance: nAllow.value, maxPerRequest: nMax.value }) }, "Create custom plan")),
+    h("div", { class: "mute", style: "margin-top:6px" }, "Edit a custom plan and the very next request uses the new limits. No redeploy."),
+  );
+
+  // History
+  $("#history").replaceChildren(h("table", {}, h("thead", {}, h("tr", {}, ["User", "Units", "Result"].map((t) => h("th", {}, t)))),
+    h("tbody", {}, history.map((x) => h("tr", {}, h("td", {}, x.userId), h("td", {}, x.units),
+      h("td", {}, x.accepted ? h("span", { class: "tag-ok" }, "accepted") : h("span", { class: "tag-no" }, `rejected (${x.rejectionLevel} ${x.rejectionRule.replaceAll("_", " ")})`)))))));
+}
+
+// Guided steps
+const steps = [
+  ["1. Alice processes 10 units", () => processDoc("alice", 10)],
+  ["2. Alice tries 25 (her plan allows 20)", () => processDoc("alice", 25)],
+  ["3. Bob processes 100", () => processDoc("bob", 100)],
+  ["4. Bob tries 100 again (account is nearly full)", () => processDoc("bob", 100)],
+  ["5. Raise the account allowance to 1000, then Bob retries", async () => {
+    await post("/api/edit-plan", { planId: state.usage.account.plan.id, monthlyAllowance: 1000, maxPerRequest: 100 });
+    await processDoc("bob", 100);
+  }],
+];
+$("#steps").replaceChildren(...steps.map(([label, fn]) => h("button", { onclick: fn }, label)));
+
+$("#resetBtn").addEventListener("click", async () => {
+  lastDecision = null;
+  await post("/api/reset");
+  await refresh();
+});
+
+refresh().catch(() => toast("Could not reach the example server."));
+</script>
+</body>
+</html>
