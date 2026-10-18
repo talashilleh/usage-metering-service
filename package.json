@@ -3,14 +3,14 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-   "scripts": {
-     "dev": "tsx watch src/index.ts",
-     "build": "tsc",
-     "start": "node dist/index.js",
-     "test": "vitest run" ,
-     "db:generate": "drizzle-kit generate",
-"db:migrate": "tsx src/db/migrate.ts"
-   },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/talashilleh/usage-metering-service.git"
@@ -18,7 +18,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-    "type": "module" ,
+  "type": "module",
   "bugs": {
     "url": "https://github.com/talashilleh/usage-metering-service/issues"
   },
@@ -32,10 +32,10 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
+    "autocannon": "^8.0.0",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }
-  
 }
