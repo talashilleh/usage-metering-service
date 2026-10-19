@@ -32,6 +32,14 @@ Open http://localhost:8080. The app holds an account API key on its own server s
 4. Bob tries 100 again: **rejected by the shared account allowance**, even though Bob himself has 9,900 units left.
 5. The account allowance is raised to 1000 and Bob retries: **accepted**. The client code did not change; only the plan did.
 
+![A request rejected by the shared account allowance: bob still has 9,100 units, but the account has only 80 left](docs/images/client-rejected.png)
+
+*A request rejected by the shared account allowance: bob still has 9,100 units, but the account has only 80 left.*
+
+![An accepted request: the balances of the user and of the account both go down](docs/images/client-accepted.png)
+
+*An accepted request: the balances of the user and of the account both go down.*
+
 The page shows every decision, the remaining allowance of the account and of each user, the plans, and recent request history. You can also switch the plan of any user or of the account, create custom plans, edit custom plans, and press "Retry this exact request" to see that a retry is not counted twice. "Reset demo" starts a fresh account.
 
 The same flow as a script (Windows PowerShell), against the running API: `.\scripts\demo.ps1`
@@ -410,6 +418,6 @@ client/               example application (server, page, Dockerfile)
 tests/                Vitest tests
 load-tests/           load test script and committed results
 scripts/demo.ps1      scripted demo against the running API
-docs/images/          charts used in this README
+docs/images/          charts and screenshots used in this README
 docker-compose.yml    db + api + client
 ```
