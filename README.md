@@ -2,7 +2,7 @@
 
 A backend service that other applications call to track usage and decide whether their users may perform an action. An account has a shared monthly allowance and each user has an individual one. Before doing work, the application asks the service to consume units. The service checks **both** plans, records the decision, and counts the units only if everything allows it. Plans can be changed through the API and apply to the very next request, with no redeploy.
 
-**Stack:** TypeScript, Fastify, PostgreSQL, drizzle ORM, zod, Vitest, autocannon. One service, one database, one example client.
+**Stack:** TypeScript, Fastify, PostgreSQL, Drizzle ORM, Zod, Vitest, autocannon. One service, one database, one example client.
 
 ## Quick start
 
@@ -20,11 +20,11 @@ Tables and the predefined plans are created automatically on startup. Data lives
 
 ### The example application
 
+The Docker Compose ports are bound to `127.0.0.1` (local machine only). If you need to expose the demo intentionally, configure `DEMO_PASSWORD` in your local `.env` before starting Docker; the browser will show a Basic Auth login. The demo is not intended to be deployed publicly.
+
 The example app holds an account API key on its own server and calls the service on behalf of two users: **alice** (Basic plan) and **bob** (Premium plan). Click the five guided steps in order: alice is accepted; alice is rejected by her own per-request limit; bob is accepted; bob is rejected by the **shared account allowance** even though he has plenty left; the account allowance is raised and the same request from bob is accepted. The client code never changes, only the plans do. The page also lets you switch plans, create and edit custom plans, and retry a request to see it is not counted twice. The same flow runs as a script with `.\scripts\demo.ps1` (PowerShell).
 
-| Rejected by the shared account allowance | Rejected by the user's own limit |
-|---|---|
-| ![bob has 9,100 units left but the account has 80](docs/images/client-rejected.png) | ![alice asks for 25 units, her plan allows 20](docs/images/client-user-limit.png) |
+Two important demo cases are the shared-account rejection (bob has sufficient personal allowance, but the company does not) and the individual per-request rejection (alice asks for 25 units, while Basic permits 20).
 
 ## Concepts and rules
 
@@ -91,7 +91,7 @@ On Windows PowerShell use `curl.exe`, or see `scripts/demo.ps1`.
 - A plan change applies to new requests after the update succeeds. Editing a custom plan changes every account or user that uses it.
 - Consumed units are preserved: usage is stored per user and per month, separately from plans, so switching plans never grants a fresh allowance.
 - If an allowance is reduced below usage, `remaining` is 0 and requests are rejected at that level until it rises again. History is never rewritten.
-- `requestId` makes `POST /consume` safe to retry. The same id returns the **stored decision** with `"replayed": true` and nothing is counted twice, even if sent many times at once. The same id with a different user or units returns `409`. A rejected decision is stored too; to try again after a plan change, send a new `requestId`.
+- `requestId` makes `POST /consume` safe to retry. The same id returns the **stored decision snapshot** (all original limits, balances, violations, and rejection message) with `"replayed": true` and nothing is counted twice, even if sent many times at once. The same id with a different user or units returns `409`. A rejected decision is stored too; to try again after a plan change, send a new `requestId`.
 
 ## Product assumptions
 
@@ -101,7 +101,7 @@ On Windows PowerShell use `curl.exe`, or see `scripts/demo.ps1`.
 4. Account creation is open (no key needed) since it issues the key and admin roles are out of scope.
 5. Plans belong to one account; names are not unique; an account plan cannot be given to a user or the reverse. Predefined plans are read-only; custom plans can be edited but not deleted. Users and accounts cannot be deleted.
 6. `monthlyAllowance` may be 0; `maxPerRequest` must be at least 1; units and limits are whole numbers up to 2,147,483,647.
-7. A request that started before a plan edit committed may still use the old limits; every request that starts after it uses the new ones.
+7. A request already executing when a plan edit begins may use the old limits; all consumes that acquire the account lock after the edit commits use the new limits. A consume and a plan edit serialize on the same account row.
 
 ## Design
 
@@ -112,7 +112,7 @@ flowchart LR
   API --> DB[("PostgreSQL<br/>accounts, plans, users,<br/>monthly counters, history")]
 ```
 
-**Data model:** `accounts`, `plans` (account_id is null for predefined), `users` (unique per account), `account_usage` and `user_usage` (consumed units per month), `requests` (one row per decision, unique per account and request id). Usage counters are stored instead of summing the history, so a limit check is a single-row lookup that stays fast as history grows. Keeping usage apart from plans is what makes plan changes safe.
+**Data model:** `accounts`, `plans` (account_id is null for predefined), `users` (unique per account), `account_usage` and `user_usage` (consumed units per month), `requests` (one row per decision, unique per account and request id, with a nullable JSONB `decision_snapshot` for historical backward compatibility). Usage counters are stored instead of summing the history, so a limit check is a single-row lookup that stays fast as history grows. Keeping usage apart from plans is what makes plan changes safe.
 
 **Trace of `POST /consume`:** `src/api/auth.ts` → `src/api/consume.ts` → `src/services/consume.ts` (numbered steps) → `src/domain/rules.ts` (the four rules).
 
@@ -124,8 +124,8 @@ flowchart TD
   C -- no --> C1["404"]
   C -- yes --> D{"requestId already answered?"}
   D -- yes --> D1["Repeat the stored answer"]
-  D -- no --> E["Load plans, create month counters"]
-  E --> F["Lock account counter, then user counter"]
+  D -- no --> E["Create monthly counters if missing"]
+  E --> F["Lock account; load latest plans; lock monthly counters"]
   F --> G{"All four rules pass?"}
   G -- yes --> H["Add units to account and user, save as accepted"]
   G -- no --> I["Save as rejected, consume nothing"]
@@ -133,11 +133,11 @@ flowchart TD
   I --> J
 ```
 
-Locking the account's counter row (`SELECT … FOR UPDATE`) serializes the requests of one account, which keeps the shared total exact, while different accounts never wait for each other. The lock order is always account first, then user, so requests can never deadlock. After the lock the request id is checked again, because two identical retries can race. Migrations and the idempotent plan seed run at startup.
+`SELECT … FOR UPDATE` locks the account row before loading either plan, then the account monthly counter and user monthly counter. Account/user plan changes also lock the account row before updating anything, so plan editing and quota consumption cannot pass one another with stale limits. Requests for distinct accounts do not contend on this application lock. A retry is checked again inside the lock, because two copies can race. Migrations and the idempotent plan seed run at startup.
 
 ## Tests
 
-39 automated tests: `docker compose up -d db`, then `npm install` and `npm test`. They need the database (port 5433); `ECONNREFUSED` means Docker is not running. They cover:
+42 automated tests (including 3 new regression cases for plan updates and stable retries): `docker compose up -d db`, then `npm install` and `npm test`. They need the database (port 5433); `ECONNREFUSED` means Docker is not running. They cover:
 
 - API key validation on every protected route, and account isolation (no account can read, use or change another's users, plans, usage or history).
 - All four rules including the examples above, shared plans with separate totals, and rejections that consume nothing.
@@ -155,9 +155,9 @@ npm install
 node load-tests/run.mjs my-label     # writes load-tests/results-my-label.md
 ```
 
-Machine: Intel i7-8850H (12 logical CPUs), 15.5 GB RAM, Windows 11, Docker Desktop. The load generator, the service and Postgres share the laptop, so compare before and after rather than raw values; each figure is one run, so differences under about 15 percent are noise.
+Machine: Intel i7-8850H (12 logical CPUs), 15.5 GB RAM, Windows 11, Docker Desktop. The load generator, the service and Postgres shared the laptop in the recorded runs, so compare before and after rather than raw values. These recordings are from before the additional locking and snapshot migration: **rerun `node load-tests/run.mjs` after upgrading**, and do not present the table as measurements of this new version.
 
-![Requests per second and p99 latency, baseline versus final](docs/images/performance.png)
+![Historical requests per second, baseline versus recorded optimized run](docs/images/performance.png)
 
 | Scenario | Baseline req/s | Final req/s | Speed-up | p99 baseline → final (ms) |
 |---|---|---|---|---|
@@ -166,15 +166,15 @@ Machine: Intel i7-8850H (12 logical CPUs), 15.5 GB RAM, Windows 11, Docker Deskt
 | C. Capped at 1000 | 41 | 147 | 3.6× | 1389 → 586 |
 | D. Retries | 46 | 414 | 9.0× | 1292 → 152 |
 
-Zero errors, and **every correctness check passed in every run**: account totals equal the sum of their users, no allowance was exceeded, and each repeated request id counted once. In C the baseline never reached the cap (412 requests) while the final version accepted **exactly 1000 units**. Full outputs are in `load-tests/results-*.md`.
+For the recorded pre-hardening runs: zero errors, and **every correctness check passed**: account totals equal the sum of their users, no allowance was exceeded, and each repeated request id counted once. In C the baseline never reached the cap (412 requests) while the final version accepted **exactly 1000 units**. Full outputs are in `load-tests/results-*.md`.
 
 **What the baseline showed.** Even retries, which only read a stored decision, managed 46 req/s, so the cost was the **database round trips** (15 per accepted request), all inside a transaction that held the account lock the whole time (about 30 ms each through Docker Desktop on Windows). Requests of one account are serialized by design, so one account's throughput is roughly 1 divided by the lock time.
 
-**What changed.** Do as much as possible before taking the lock: retries are answered with no lock at all (stored decisions never change), the user, plans and month counters are loaded or created before the lock, and the connection pool went from 10 to 20. Round trips while holding the lock: accepted 15 → 8, rejected 13 → 6, retry 14 → 0. The lock order, the re-check of the request id under the lock, and the 39 tests are unchanged, so correctness is preserved.
+**What changed.** Do as much as possible before taking the lock: retries are answered with no lock at all (stored decisions never change), in the earlier implementation the user and plans were loaded and month counters created before the counter lock, and the connection pool went from 10 to 20. In the new implementation plans are deliberately loaded **after** acquiring the account-row lock for correctness. The earlier optimization reduced round trips while holding the counter lock: accepted 15 → 8, rejected 13 → 6, retry 14 → 0. **These are pre-hardening benchmark figures**; the security/correctness revisions now take the account row lock as well and have not been load-tested with autocannon again.
 
 **A faster version not kept.** An experimental version with one hand-written SQL query and one multi-table statement reached A 103, B 250, C 129, D 815 req/s (`results-optimized.md`, code in git history). It was dropped on purpose: the author must be able to explain every line. The simple version matches it within noise for A and C, is about 15 percent slower for B and half as fast for retries.
 
-**Still the bottleneck:** one account tops out near 120 requests per second here (about 8 ms of lock time each), inherent to keeping a shared total exact with row locks. B reaches 214, not 20 times more, so another limit applies (a single-threaded Node process on a shared laptop); this was not profiled further.
+**Still the bottleneck:** in the recorded pre-hardening benchmark one account reached about 120 requests per second; current throughput requires a fresh run, since the account row lock adds coordination with plan edits. B reaches 214, not 20 times more, so another limit applies (a single-threaded Node process on a shared laptop); this was not profiled further.
 
 ## Known limitations
 
@@ -183,6 +183,7 @@ Zero errors, and **every correctness check passed in every run**: account totals
 - No deletion of users, plans or accounts, and users cannot move between accounts.
 - A rejected decision is replayed for the same `requestId`; retrying after a limit change needs a new id.
 - History uses offset pagination (slow for very deep pages) and grows without limit.
+- The local example application's demo endpoints require no password unless `DEMO_PASSWORD` is set; Docker publishes them only to `127.0.0.1`. Never put it on a public host without access controls.
 - The month comes from the API server's clock; with several instances, skew near midnight UTC could assign a request to different months.
 - One service and one database, no replication, as the brief's scope states. Load numbers come from one laptop and show relative improvement, not production capacity. Tests share the development database.
 
@@ -196,3 +197,10 @@ src/db/            schema, pool, migrations runner, seed       drizzle/  generat
 client/            example application        tests/  Vitest        load-tests/  script + results
 scripts/demo.ps1   scripted demo               docs/images/  README images
 ```
+## Review fixes (October 2026)
+
+- Plan editing, account-plan switching, user-plan switching and consumption now synchronize using the same account-row lock. Old plans cannot accidentally be used after the edit has committed.
+- Exact idempotency snapshots are persisted in `requests.decision_snapshot`. Historical request rows created by older versions use a compatibility fallback.
+- Added database constraints to prevent invalid usage counters, request units and plan limits; JSON parsing errors return HTTP 400.
+- The sample client is bound to the local machine in Docker; optional `DEMO_PASSWORD` allows Basic Auth if needed.
+- Performance results shown above are historical and should be rerun before presenting the optimized figures as current.

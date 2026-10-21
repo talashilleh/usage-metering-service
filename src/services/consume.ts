@@ -62,7 +62,7 @@ function describeSide(plan: Plan, consumed: number): Side {
   };
 }
 
-// Finds the account plan and the user plan that apply right now.
+// Used only for legacy history rows created before decision snapshots were stored.
 async function loadPlans(accountId: string, user: User) {
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId));
   const [accountPlan] = await db.select().from(plans).where(eq(plans.id, account.accountPlanId));
@@ -136,6 +136,13 @@ async function repeatOldAnswer(input: ConsumeInput, user: User, old: OldRequest)
     return { kind: "request_id_conflict" };
   }
 
+  // New decisions preserve the original plan, balances and all violations.
+  // Only "replayed" changes to tell the caller this was a retry.
+  if (old.decisionSnapshot) {
+    return { kind: "decision", decision: { ...(old.decisionSnapshot as Decision), replayed: true } };
+  }
+
+  // Backward compatibility for rows saved before the snapshot migration.
   const { accountPlan, userPlan } = await loadPlans(input.accountId, user);
   const { accountConsumed, userConsumed } = await loadConsumed(input.accountId, user.id, old.month);
 
@@ -184,8 +191,8 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
     .limit(1);
   if (old) return repeatOldAnswer(input, user, old);
 
-  // Step 3. Load the two plans (account plan and user plan).
-  const { accountPlan, userPlan } = await loadPlans(input.accountId, user);
+  // Step 3. Plans will be loaded INSIDE the transaction, after the account lock.
+  // This guarantees that an update committed before this lock is reflected.
 
   // Step 4. Make sure this month's two counters exist (they start at zero).
   // If they already exist, nothing happens. We do this now, before locking, to keep the lock short.
@@ -194,7 +201,19 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
 
   // Step 5. Everything below happens inside ONE transaction: it fully happens or not at all.
   return db.transaction(async (tx): Promise<ConsumeResult | "duplicate"> => {
-    // Step 5a. Lock this month's counter of the ACCOUNT. While we hold it, no other request
+    // Step 5a. The account row is the shared lock for consuming AND editing plans.
+    // Plan updates also take this lock first, so no update can slip between
+    // reading limits and saving the usage decision.
+    const [lockedAccount] = await tx.select().from(accounts)
+      .where(eq(accounts.id, input.accountId)).for("update");
+    const [currentUser] = await tx.select().from(users)
+      .where(and(eq(users.accountId, input.accountId), eq(users.id, user.id)));
+    const [accountPlan] = await tx.select().from(plans)
+      .where(eq(plans.id, lockedAccount.accountPlanId));
+    const [userPlan] = await tx.select().from(plans)
+      .where(eq(plans.id, currentUser.userPlanId));
+
+    // Step 5b. Lock this month's counter of the ACCOUNT. While we hold it, no other request
     // of the same account can run, so two requests can never spend the same units.
     const [accountCounter] = await tx
       .select()
@@ -202,7 +221,7 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
       .where(and(eq(accountUsage.accountId, input.accountId), eq(accountUsage.month, month)))
       .for("update");
 
-    // Step 5b. Lock this month's counter of the USER.
+    // Step 5c. Lock this month's counter of the USER.
     // Always account first, then user, so two requests can never wait for each other forever.
     const [userCounter] = await tx
       .select()
@@ -210,7 +229,7 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
       .where(and(eq(userUsage.userId, user.id), eq(userUsage.month, month)))
       .for("update");
 
-    // Step 5c. Check again for a retry. A copy of this same request may have finished
+    // Step 5d. Check again for a retry. A copy of this same request may have finished
     // while we were waiting for the lock.
     const [sameRequest] = await tx
       .select()
@@ -219,7 +238,7 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
       .limit(1);
     if (sameRequest) return "duplicate";
 
-    // Step 5d. Check the four rules (see rules.ts). An empty list means everything is fine.
+    // Step 5e. Check the four rules (see rules.ts). An empty list means everything is fine.
     const violations = evaluate(
       input.units,
       { limits: accountPlan, consumed: accountCounter.consumed },
@@ -227,7 +246,7 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
     );
     const accepted = violations.length === 0;
 
-    // Step 5e. If accepted, add the units to the account counter and to the user counter.
+    // Step 5f. If accepted, add the units to the account counter and to the user counter.
     if (accepted) {
       await tx
         .update(accountUsage)
@@ -239,20 +258,8 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
         .where(and(eq(userUsage.userId, user.id), eq(userUsage.month, month)));
     }
 
-    // Step 5f. Always save the request in the history (accepted or rejected).
+    // Step 5g. Build the answer with the exact limits and balances used.
     const firstBrokenRule = violations[0];
-    await tx.insert(requests).values({
-      accountId: input.accountId,
-      userId: user.id,
-      requestId: input.requestId,
-      units: input.units,
-      month,
-      accepted,
-      rejectionLevel: firstBrokenRule ? firstBrokenRule.level : null,
-      rejectionRule: firstBrokenRule ? firstBrokenRule.rule : null,
-    });
-
-    // Step 5g. Build the answer.
     const rejection = firstBrokenRule
       ? makeRejection(
           firstBrokenRule,
@@ -275,6 +282,20 @@ async function tryConsume(input: ConsumeInput): Promise<ConsumeResult | "duplica
       userPlan,
       accountConsumed: accountCounter.consumed + added,
       userConsumed: userCounter.consumed + added,
+    });
+
+    // Step 5h. Save the FULL decision atomically with the counter changes.
+    // Replaying it later must not recompute the answer using newer plans.
+    await tx.insert(requests).values({
+      accountId: input.accountId,
+      userId: user.id,
+      requestId: input.requestId,
+      units: input.units,
+      month,
+      accepted,
+      rejectionLevel: firstBrokenRule ? firstBrokenRule.level : null,
+      rejectionRule: firstBrokenRule ? firstBrokenRule.rule : null,
+      decisionSnapshot: decision,
     });
     return { kind: "decision", decision };
   });

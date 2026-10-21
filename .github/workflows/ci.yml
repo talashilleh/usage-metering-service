@@ -1,0 +1,32 @@
+name: Build and integration tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: metering
+          POSTGRES_PASSWORD: metering
+          POSTGRES_DB: metering
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U metering"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+        env:
+          DATABASE_URL: postgres://metering:metering@localhost:5433/metering

@@ -14,14 +14,38 @@ export function buildApp() {
       return reply.code(400).send({
         error: "invalid_request",
         message: "Request validation failed.",
-        details: error.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
+        details: error.issues.map((i) => ({
+          path: i.path.join("."),
+          message: i.message,
+        })),
       });
     }
+
+    // Handle client errors reported by Fastify
+    if (
+      error instanceof Error &&
+      "statusCode" in error &&
+      typeof error.statusCode === "number" &&
+      error.statusCode >= 400 &&
+      error.statusCode < 500
+    ) {
+      return reply.code(error.statusCode).send({
+        error: "invalid_request",
+        message: error.message,
+      });
+    }
+
     app.log.error(error);
-    return reply.code(500).send({ error: "internal_error", message: "Something went wrong." });
+
+    return reply.code(500).send({
+      error: "internal_error",
+      message: "Something went wrong.",
+    });
   });
 
-  app.get("/health", async () => ({ status: "ok" }));
+  app.get("/health", async () => ({
+    status: "ok",
+  }));
 
   app.register(accountRoutes);
   app.register(planRoutes);

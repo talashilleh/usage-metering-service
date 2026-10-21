@@ -66,12 +66,15 @@ export async function planRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: "predefined_plan_read_only", message: "Predefined plans cannot be changed." });
     }
 
-    const [updated] = await db
-      .update(plans)
-      .set({ ...body, updatedAt: new Date() })
-      .where(eq(plans.id, plan.id))
-      .returning();
-    return updated;
+    // Custom plans belong to one account. Serialize edits with /consume.
+    return db.transaction(async (tx) => {
+      await tx.select().from(accounts).where(eq(accounts.id, account.id)).for("update");
+      const [updated] = await tx.update(plans)
+        .set({ ...body, updatedAt: new Date() })
+        .where(and(eq(plans.id, plan.id), eq(plans.accountId, account.id)))
+        .returning();
+      return updated;
+    });
   });
 
   // Switch the account's own plan. Usage already consumed this month is kept.
@@ -82,7 +85,10 @@ export async function planRoutes(app: FastifyInstance) {
     const plan = await findAssignablePlan(account.id, planId, "account");
     if (!plan) return reply.code(404).send({ error: "plan_not_found", message: "No such account plan." });
 
-    await db.update(accounts).set({ accountPlanId: plan.id }).where(eq(accounts.id, account.id));
+    await db.transaction(async (tx) => {
+      await tx.select().from(accounts).where(eq(accounts.id, account.id)).for("update");
+      await tx.update(accounts).set({ accountPlanId: plan.id }).where(eq(accounts.id, account.id));
+    });
     return {
       id: account.id,
       name: account.name,

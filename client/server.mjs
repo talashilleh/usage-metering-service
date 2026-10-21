@@ -3,7 +3,7 @@
 // service on behalf of its users. The business action itself is simulated.
 import http from "node:http";
 import { readFile, writeFile, rm } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -11,6 +11,21 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const API = process.env.API_URL ?? "http://localhost:3000";
 const PORT = Number(process.env.PORT ?? 8080);
 const DATA_FILE = process.env.DATA_FILE ?? path.join(here, "demo.json");
+// The Docker Compose demo binds to localhost only. Set DEMO_PASSWORD if exposing it.
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? "";
+
+function authorized(req) {
+  if (!DEMO_PASSWORD) return true; // local-only default; see docker-compose.yml
+  const auth = req.headers.authorization ?? "";
+  if (!auth.startsWith("Basic ")) return false;
+  const value = Buffer.from(auth.slice(6), "base64").toString("utf8");
+  const colon = value.indexOf(":");
+  if (colon < 0) return false;
+  const password = value.slice(colon + 1);
+  const actual = Buffer.from(password);
+  const expected = Buffer.from(DEMO_PASSWORD);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
 
 let apiKey = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -165,6 +180,10 @@ const server = http.createServer(async (req, res) => {
   try {
     await ready;
     const url = new URL(req.url, "http://localhost");
+    if (!authorized(req)) {
+      res.writeHead(401, { "www-authenticate": 'Basic realm="Metering Demo"', "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: "unauthorized" }));
+    }
 
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       const html = await readFile(path.join(here, "index.html"));

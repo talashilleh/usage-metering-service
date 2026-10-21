@@ -1,3 +1,24 @@
-node_modules
-dist
+# Dependencies and build artifacts
+node_modules/
+dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Local configuration and credentials
 .env
+.env.*
+!.env.example
+client/demo.json
+client/data/
+
+# Logs and local scratch files
+*.log
+npm-debug.log*
+test-output.txt
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.zip
+*.rar

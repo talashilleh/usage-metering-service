@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { plans, users } from "../db/schema.js";
+import { accounts, plans, users } from "../db/schema.js";
 import { isUniqueViolation } from "../db/errors.js";
 import { findAssignablePlan, getPredefinedPlan } from "../services/plans.js";
 import { requireApiKey } from "./auth.js";
@@ -86,11 +86,13 @@ export async function userRoutes(app: FastifyInstance) {
     }
 
     // Changing the plan does not touch usage counters, so consumed units are preserved.
-    const [updated] = await db
-      .update(users)
-      .set({ userPlanId: plan.id })
-      .where(eq(users.id, user.id))
-      .returning();
+    const [updated] = await db.transaction(async (tx) => {
+      await tx.select().from(accounts).where(eq(accounts.id, account.id)).for("update");
+      return tx.update(users)
+        .set({ userPlanId: plan.id })
+        .where(and(eq(users.id, user.id), eq(users.accountId, account.id)))
+        .returning();
+    });
     return describeUser(updated);
   });
 }

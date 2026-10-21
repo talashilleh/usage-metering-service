@@ -372,3 +372,52 @@ describe("concurrent requests", () => {
     expect(u.remaining).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("hardening regressions", () => {
+  it("replays the ORIGINAL decision even after usage and plans change", async () => {
+    const a = await newAccount();
+    const p = await newPlan(a.key, "user", 100, 50);
+    await newUser(a.key, "alice", p.id);
+
+    const first = (await consume(a.key, "alice", 5, "original-snapshot")).body;
+    expect(first).toMatchObject({ accepted: true, replayed: false });
+    await consume(a.key, "alice", 8, "another-request");
+    await call("PUT", `/plans/${p.id}`, a.key, { monthlyAllowance: 13, maxPerRequest: 1 });
+
+    const replay = (await consume(a.key, "alice", 5, "original-snapshot")).body;
+    expect(replay).toEqual({ ...first, replayed: true });
+    expect((await call("GET", "/users/alice/usage", a.key)).body.user.consumed).toBe(13);
+  });
+
+  it("replays every violation of a rejected decision, not just its first reason", async () => {
+    const a = await newAccount();
+    const p = await newPlan(a.key, "user", 2, 1);
+    await newUser(a.key, "alice", p.id);
+    const first = (await consume(a.key, "alice", 10, "rejected-snapshot")).body;
+    expect(first.accepted).toBe(false);
+    expect(first.violations.length).toBeGreaterThan(1);
+
+    await call("PUT", `/plans/${p.id}`, a.key, { monthlyAllowance: 100, maxPerRequest: 100 });
+    const replay = (await consume(a.key, "alice", 10, "rejected-snapshot")).body;
+    expect(replay).toEqual({ ...first, replayed: true });
+    expect((await call("GET", "/users/alice/usage", a.key)).body.user.consumed).toBe(0);
+  });
+
+  it("uses the new limit for all requests arriving after a plan edit commits", async () => {
+    const a = await newAccount();
+    const p = await newPlan(a.key, "user", 500, 50);
+    await newUser(a.key, "alice", p.id);
+
+    // Begin traffic before the edit; those requests may legitimately use old limits.
+    const earlier = Array.from({ length: 25 }, (_, i) => consume(a.key, "alice", 1, `old-${i}`));
+    expect((await call("PUT", `/plans/${p.id}`, a.key, { monthlyAllowance: 0 })).status).toBe(200);
+
+    // These requests begin only AFTER the update response: all must see zero.
+    const later = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => consume(a.key, "alice", 1, `new-${i}`)),
+    );
+    await Promise.all(earlier);
+    expect(later.every((r) => r.status === 200 && r.body.accepted === false)).toBe(true);
+    expect(later.every((r) => r.body.user.limits.monthlyAllowance === 0)).toBe(true);
+  });
+});

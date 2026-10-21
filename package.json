@@ -11,18 +11,10 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/talashilleh/usage-metering-service.git"
-  },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
-  "bugs": {
-    "url": "https://github.com/talashilleh/usage-metering-service/issues"
-  },
-  "homepage": "https://github.com/talashilleh/usage-metering-service#readme",
   "dependencies": {
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.5",
